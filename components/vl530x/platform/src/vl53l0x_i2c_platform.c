@@ -56,13 +56,14 @@
 esp_err_t VL53L0X_comms_initialise(uint8_t comms_type, uint16_t comms_speed_khz,
                                    i2c_master_bus_handle_t bus_handle,
                                    i2c_master_dev_handle_t *dev_handle) {
-  static const int32_t cmax_devices = 4;
 
   esp_err_t status = ESP_OK;
-  int32_t argc = 1;
 
-  i2c_device_config_t dev_config = {
-      I2C_ADDR_BIT_LEN_7, 0x29, comms_speed_khz * 1000, 0, {1}};
+  i2c_device_config_t dev_config = {I2C_ADDR_BIT_LEN_7,
+                                    I2C_DEVICE_ADDRESS_NOT_USED,
+                                    comms_speed_khz * 1000,
+                                    0,
+                                    {1}};
 
   if (status == ESP_OK) {
     status = i2c_master_bus_add_device(bus_handle, &dev_config, dev_handle);
@@ -101,13 +102,28 @@ esp_err_t VL53L0X_write_multi(i2c_master_dev_handle_t handle, uint8_t index,
   trace_i2c("Write reg : 0x%04X, Val : 0x%s\n", index, value_as_str);
 #endif
 
-  status = i2c_master_transmit(handle, pdata, count,
-                               1000); // TODO: define ms for timeout
+  uint8_t address2 = 0x52;
+  i2c_operation_job_t i2c_ops1[] = {
+      {.command = I2C_MASTER_CMD_START},
+      {.command = I2C_MASTER_CMD_WRITE,
+       .write = {.ack_check = true,
+                 .data = (uint8_t *)&address2,
+                 .total_bytes = 1}},
+      {.command = I2C_MASTER_CMD_WRITE,
+       .write = {.ack_check = true, .data = &index, .total_bytes = 1}},
+      {.command = I2C_MASTER_CMD_WRITE,
+       .write = {.ack_check = true, .data = pdata, .total_bytes = count}},
+      {.command = I2C_MASTER_CMD_STOP},
+  };
 
+  status = i2c_master_execute_defined_operations(
+      handle, i2c_ops1, sizeof(i2c_ops1) / sizeof(i2c_operation_job_t), 1000);
+
+#ifdef VL53L0X_LOG_ENABLE
   if (status != ESP_OK) {
-    printf("ESP ERROR: %c",
-           *esp_err_to_name(status)); // TODO: Abstract error logging
+    trace_i2c("ESP ERROR: %c", *esp_err_to_name(status));
   }
+#endif
 
   return status;
 }
@@ -121,14 +137,41 @@ esp_err_t VL53L0X_read_multi(i2c_master_dev_handle_t handle, uint8_t index,
   char value_as_str[VL53L0X_MAX_STRING_LENGTH_PLT];
   char *pvalue_as_str;
 #endif
+  // status = i2c_master_transmit_receive(handle, &index, 1, pdata, count, 50);
+  //   read 8-bit standard V2W8 write (not paging mode)
+  //  status = i2c_master_receive(handle, pdata, count, 1000);
+  uint8_t address1 = 0x52;
+  uint8_t address2 = 0x53;
+  i2c_operation_job_t i2c_ops1[] = {
+      {.command = I2C_MASTER_CMD_START},
+      {.command = I2C_MASTER_CMD_WRITE,
+       .write = {.ack_check = true,
+                 .data = (uint8_t *)&address1,
+                 .total_bytes = 1}},
+      {.command = I2C_MASTER_CMD_WRITE,
+       .write = {.ack_check = true, .data = &index, .total_bytes = 1}},
+      {.command = I2C_MASTER_CMD_START},
+      {.command = I2C_MASTER_CMD_WRITE,
+       .write = {.ack_check = true, .data = &address2, .total_bytes = 1}},
+      {.command = I2C_MASTER_CMD_READ,
+       .read = {.ack_value = I2C_ACK_VAL,
+                .data = pdata,
+                .total_bytes = count - 1}},
+      {.command = I2C_MASTER_CMD_READ,
+       .read = {.ack_value = I2C_NACK_VAL,
+                .data = pdata + count - 1,
+                .total_bytes = 1}},
+      {.command = I2C_MASTER_CMD_STOP},
+  };
 
-  // read 8-bit standard V2W8 write (not paging mode)
-  status = i2c_master_receive(handle, pdata, count, 1000);
+  status = i2c_master_execute_defined_operations(
+      handle, i2c_ops1, sizeof(i2c_ops1) / sizeof(i2c_operation_job_t), 1000);
 
+#ifdef VL53L0X_LOG_ENABLE
   if (status != ESP_OK) {
-    printf("ESP ERROR: %c",
-           *esp_err_to_name(status)); // TODO: Abstract error logging
+    trace_i2c("ESP ERROR: %c", *esp_err_to_name(status));
   }
+#endif
 
 #ifdef VL53L0X_LOG_ENABLE
   // Build  value as string;
@@ -221,10 +264,8 @@ esp_err_t VL53L0X_read_dword(i2c_master_dev_handle_t handle, uint8_t index,
 
 esp_err_t VL53L0X_platform_wait_us(int32_t wait_us) {
   esp_err_t status = ESP_OK;
-  float wait_ms = (float)wait_us / 1000.0f;
-  const TickType_t xDelayMS = wait_ms / portTICK_PERIOD_MS;
 
-  vTaskDelay(xDelayMS);
+  esp_rom_delay_us((uint32_t)wait_us);
 
 #ifdef VL53L0X_LOG_ENABLE
   trace_i2c("Wait us : %6d\n", wait_us);

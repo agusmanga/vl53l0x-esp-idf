@@ -46,7 +46,7 @@ extern "C" {
  * @brief platform log function definition
  */
 
-#define VL53L0X_LOG_ENABLE 0
+// #define VL53L0X_LOG_ENABLE 0
 
 enum {
   TRACE_LEVEL_NONE,
