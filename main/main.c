@@ -3,12 +3,51 @@
 #include "driver/i2c_master.h"
 #include "driver/i2c_types.h"
 #include "esp_err.h"
+#include "esp_intr_alloc.h"
+#include "esp_intr_types.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "hal/gpio_types.h"
 #include "portmacro.h"
+#include "soc/gpio_num.h"
 #include "vl53l0x_api.h"
+#include "vl53l0x_def.h"
 #include "vl53l0x_platform.h"
+#include <stdint.h>
 #include <stdio.h>
-#include <uchar.h>
+#define GPIO_OUTPUT_PIN_SEL ((1ULL << 18))
+
+QueueHandle_t gpio_evt_queue = NULL;
+
+void handle_intr(void *args) {
+  gpio_intr_disable(GPIO_NUM_18);
+  int num = 1;
+  xQueueSendFromISR(gpio_evt_queue, &num, NULL);
+}
+
+void perform_reading(void *args) {
+  for (;;) {
+    int num;
+    if (xQueueReceive(gpio_evt_queue, &num, portMAX_DELAY)) {
+      esp_err_t status;
+      VL53L0X_RangingMeasurementData_t pRangingMeasurementData = {0};
+      status =
+          VL53L0X_GetRangingMeasurementData(args, &pRangingMeasurementData);
+      if (status == ESP_OK) {
+        ESP_LOGI("MEASUREMENT", "Measured distance: %i cm\n\n",
+                 pRangingMeasurementData.RangeMilliMeter / 10);
+        VL53L0X_ClearInterruptMask(
+            args, VL53L0X_REG_SYSTEM_INTERRUPT_GPIO_NEW_SAMPLE_READY);
+        gpio_intr_enable(GPIO_NUM_18);
+      } else {
+        ESP_LOGE("MEASUREMENT", "%s", esp_err_to_name(status));
+      }
+    }
+  }
+}
 
 void print_range_status(
     VL53L0X_RangingMeasurementData_t *pRangingMeasurementData) {
@@ -71,15 +110,6 @@ void ranging_test(VL53L0X_Dev_t *pMyDevice) {
         VL53L0X_SetDeviceMode(pMyDevice, VL53L0X_DEVICEMODE_SINGLE_RANGING);
   }
 
-  if (status == VL53L0X_ERROR_NONE) {
-
-    // no need to do this when we use VL53L0X_PerformSingleRangingMeasurement
-    printf("Call of VL53L0X_SetDeviceMode\n");
-    status = VL53L0X_SetDeviceMode(
-        pMyDevice,
-        VL53L0X_DEVICEMODE_SINGLE_RANGING); // Setup in single ranging mode
-  }
-
   // Enable/Disable Sigma and Signal check
   if (status == VL53L0X_ERROR_NONE) {
     status = VL53L0X_SetLimitCheckEnable(
@@ -128,10 +158,112 @@ void ranging_test(VL53L0X_Dev_t *pMyDevice) {
   }
 }
 
+void ranging_continuous_int(VL53L0X_Dev_t *pMyDevice) {
+  esp_err_t status;
+  uint8_t pVhvSettings;
+  uint8_t pPhaseCal;
+  uint32_t refSpadCount;
+  uint8_t isApertureSpads;
+  VL53L0X_RangingMeasurementData_t pRangingMeasurementData;
+  FixPoint1616_t pLimitCheckCurrent;
+  VL53L0X_DeviceInfo_t info;
+  intr_handler_t intrHandler = NULL;
+  intr_handle_t *intrHandle = {0};
+
+  printf("-----BEGINNING RANGING TEST-----\n");
+
+  status = VL53L0X_StaticInit(pMyDevice);
+
+  status = VL53L0X_GetDeviceInfo(pMyDevice, &info);
+
+  printf("Status: %d\n", status);
+  printf("Name: %s\n", info.Name);
+  printf("Type: %s\n", info.Type);
+  printf("ProductId: %s\n", info.ProductId);
+  printf("Revision: %d.%d\n", info.ProductRevisionMajor,
+         info.ProductRevisionMinor);
+
+  if (status == ESP_OK) {
+    printf("----INIT DONE----\n");
+    status =
+        VL53L0X_PerformRefCalibration(pMyDevice, &pVhvSettings, &pPhaseCal);
+    printf("%d", status);
+  }
+  if (status == ESP_OK) {
+    printf("----CALIBRATION DONE----\n");
+    status = VL53L0X_PerformRefSpadManagement(pMyDevice, &refSpadCount,
+                                              &isApertureSpads);
+    printf("%d", status);
+  }
+
+  if (status == ESP_OK) {
+    printf("----SPAD MANAGEMENT DONE----\n");
+    VL53L0X_DeviceModes pDeviceMode;
+    status = VL53L0X_GetDeviceMode(pMyDevice, &pDeviceMode);
+    printf("%d", pDeviceMode);
+    status =
+        VL53L0X_SetDeviceMode(pMyDevice, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING);
+  }
+
+  // Enable/Disable Sigma and Signal check
+  if (status == VL53L0X_ERROR_NONE) {
+    status = VL53L0X_SetLimitCheckEnable(
+        pMyDevice, VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE, 1);
+  }
+  if (status == VL53L0X_ERROR_NONE) {
+    status = VL53L0X_SetLimitCheckEnable(
+        pMyDevice, VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, 1);
+  }
+
+  if (status == VL53L0X_ERROR_NONE) {
+    status = VL53L0X_SetLimitCheckEnable(
+        pMyDevice, VL53L0X_CHECKENABLE_RANGE_IGNORE_THRESHOLD, 1);
+  }
+
+  if (status == VL53L0X_ERROR_NONE) {
+    status = VL53L0X_SetLimitCheckValue(
+        pMyDevice, VL53L0X_CHECKENABLE_RANGE_IGNORE_THRESHOLD,
+        (FixPoint1616_t)(1.5 * 0.023 * 65536));
+  }
+
+  if (status == ESP_OK) {
+    status = VL53L0X_SetGpioConfig(pMyDevice, 0,
+                                   VL53L0X_DEVICEMODE_CONTINUOUS_RANGING,
+                                   VL53L0X_GPIOFUNCTIONALITY_NEW_MEASURE_READY,
+                                   VL53L0X_INTERRUPTPOLARITY_HIGH);
+  }
+
+  if (status == ESP_OK) {
+    printf("----GPIOCONFIG SUCCESS----");
+    gpio_config_t config = {GPIO_OUTPUT_PIN_SEL, GPIO_MODE_INPUT,
+                            GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE,
+                            GPIO_INTR_HIGH_LEVEL};
+
+    gpio_evt_queue = xQueueCreate(10, sizeof(int));
+    xTaskCreate(perform_reading, "perform_reading", 2048, pMyDevice, 10, NULL);
+
+    status = gpio_config(&config);
+    status = gpio_intr_enable(GPIO_NUM_18);
+    // status = gpio_isr_register(handle_intr, pMyDevice, NULL, intrHandle);
+    status = gpio_install_isr_service(0);
+    status = gpio_isr_handler_add(GPIO_NUM_18, handle_intr, pMyDevice);
+  }
+
+  if (status == ESP_OK) {
+    printf("----INTR ALLOC SUCCESS----");
+    printf("____STARTING MEASURMENT____");
+    status = VL53L0X_StartMeasurement(pMyDevice);
+  }
+
+  if (status != ESP_OK) {
+    printf("FAILED");
+  }
+}
+
 void app_main(void) {
   i2c_master_bus_handle_t bus_handle = {0};
   i2c_master_dev_handle_t dev_handle = {0};
-  VL53L0X_Dev_t MyDevice;
+  static VL53L0X_Dev_t MyDevice;
   VL53L0X_Dev_t *pMyDevice = &MyDevice;
 
   VL53L0X_DeviceInfo_t info = {0};
@@ -172,5 +304,5 @@ void app_main(void) {
   printf("MODEL: %s\n", info.ProductId);
   printf("revision: %d\n", info.ProductRevisionMajor);
 
-  ranging_test(pMyDevice);
+  ranging_continuous_int(pMyDevice);
 }
