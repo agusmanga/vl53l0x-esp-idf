@@ -20,6 +20,8 @@ This is an independent port and is not an official STMicroelectronics release.
 
 ## Example connections
 
+<img src="docs/images/vl53l0x-module.png" alt="VL53L0X breakout module with labeled pins" width="320">
+
 | Signal | ESP32 GPIO |
 | --- | --- |
 | SDA | 21 |
@@ -28,6 +30,12 @@ This is an independent port and is not an official STMicroelectronics release.
 
 The example uses the sensor's 7-bit I²C address `0x29`.
 Adjust the GPIO configuration for your board and wiring.
+
+## Example output
+
+The example logs the measured distance in centimeters:
+
+![Serial output showing a measured distance of 34 cm](docs/images/ranging-output.png)
 
 ## License and attribution
 
