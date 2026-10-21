@@ -244,7 +244,6 @@ void ranging_continuous_int(VL53L0X_Dev_t *pMyDevice) {
 
     status = gpio_config(&config);
     status = gpio_intr_enable(GPIO_NUM_18);
-    // status = gpio_isr_register(handle_intr, pMyDevice, NULL, intrHandle);
     status = gpio_install_isr_service(0);
     status = gpio_isr_handler_add(GPIO_NUM_18, handle_intr, pMyDevice);
   }
